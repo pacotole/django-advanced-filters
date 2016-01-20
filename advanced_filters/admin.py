@@ -40,15 +40,19 @@ class AdvancedListFilters(admin.SimpleListFilter):
         return queryset
 
 
-class AdminAdvancedFiltersMixin(object):
+class BaseAdminAdvancedFiltersMixin(object):
+    """ Base AdvancedFilters mixin. Only adds AdvancedListFilters to list_filter """
+
+    def __init__(self, *args, **kwargs):
+        super(BaseAdminAdvancedFiltersMixin, self).__init__(*args, **kwargs)
+        # add list filters to filters
+        self.list_filter = (AdvancedListFilters,) + self.list_filter
+
+
+class AdminAdvancedFiltersMixin(BaseAdminAdvancedFiltersMixin):
     """ Generic AdvancedFilters mixin """
     change_list_template = "admin/advanced_filters.html"
     advanced_filter_form = AdvancedFilterForm
-
-    def __init__(self, *args, **kwargs):
-        super(AdminAdvancedFiltersMixin, self).__init__(*args, **kwargs)
-        # add list filters to filters
-        self.list_filter = (AdvancedListFilters,) + self.list_filter
 
     def save_advanced_filter(self, request, form):
         if form.is_valid():
