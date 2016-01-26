@@ -7,7 +7,7 @@ from django.contrib.admin.util import unquote
 from django.shortcuts import resolve_url
 
 from .forms import AdvancedFilterForm
-from .models import AdvancedFilter
+from .models import AdvancedFilter, Condition
 
 
 logger = logging.getLogger('advanced_filters.admin')
@@ -45,6 +45,7 @@ class BaseAdminAdvancedFiltersMixin(object):
 
     def __init__(self, *args, **kwargs):
         super(BaseAdminAdvancedFiltersMixin, self).__init__(*args, **kwargs)
+        self.has_advanced_filter = True
         # add list filters to filters
         self.list_filter = (AdvancedListFilters,) + self.list_filter
 
@@ -97,37 +98,136 @@ class AdminAdvancedFiltersMixin(BaseAdminAdvancedFiltersMixin):
                      ).changelist_view(request, extra_context=extra_context)
 
 
+# ============================================================================
+# ============================================================================
+# ============================================================================
+# ============================================================================
+# ============================================================================
+
+
+from .forms import  CustomInlineFormset, ConditionModelForm, SimpleAdvancedFilterForm
+from django.db.models import Q
+
+class ConditionInline(admin.TabularInline):
+    """
+    Custom inline admin that support initial data
+    """
+    form = ConditionModelForm
+    formset = CustomInlineFormset
+
+    model = Condition
+    extra = 1
+    # max_num = 10
+    can_delete = True
+
+    def get_queryset(self, request):
+        """return empty queryset"""
+        return Condition.objects.none()
+
+    def get_extra(self, request, obj=None, **kwargs):
+        return self.extra if obj.b64_query == '' else 0
+
+
 class AdvancedFilterAdmin(admin.ModelAdmin):
     model = AdvancedFilter
-    form = AdvancedFilterForm
-    extra = 0
+    form = SimpleAdvancedFilterForm
 
-    list_display = ('title', 'created_by', )
-    readonly_fields = ('created_by', 'model', )
+    list_display = ('title', 'model', 'created_by',)
+    list_link_display = ('title',)
 
-    def has_add_permission(self, obj=None):
-        return False
+    inlines = (ConditionInline,)
+
+    # def has_add_permission(self, obj=None):
+    #     return False
+
+    # def change_view(self, request, object_id, form_url='', extra_context=None):
+    #     orig_response = super(AdvancedFilterAdmin, self).change_view(
+    #         request, object_id, form_url, extra_context)
+    #     if '_save_goto' in request.POST:
+    #         obj = self.get_object(request, unquote(object_id))
+    #         if obj:
+    #             app, model = obj.model.split('.')
+    #             path = resolve_url('admin:%s_%s_changelist' % (
+    #                 app, model.lower()))
+    #             url = "{path}{qparams}".format(
+    #                 path=path, qparams="?_afilter={id}".format(id=object_id))
+    #             return HttpResponseRedirect(url)
+    #     return orig_response
+
+    def _create_formsets(self, request, obj, change):
+        """overide to provide initial data for inline formset"""
+        formsets = []
+        inline_instances = []
+        prefixes = {}
+        get_formsets_args = [request]
+        if change:
+            get_formsets_args.append(obj)
+        for FormSet, inline in self.get_formsets_with_inlines(*get_formsets_args):
+            prefix = FormSet.get_default_prefix()
+            prefixes[prefix] = prefixes.get(prefix, 0) + 1
+            if prefixes[prefix] != 1 or not prefix:
+                prefix = "%s-%s" % (prefix, prefixes[prefix])
+            formset_params = {
+                'instance': obj,
+                'prefix': prefix,
+                'queryset': inline.get_queryset(request),
+            }
+            if request.method == 'POST':
+                formset_params.update({
+                    'data': request.POST,
+                    'files': request.FILES,
+                    'save_as_new': '_saveasnew' in request.POST
+                })
+            # Set field_choices and inital data
+            formset_params['filter_fields'] = obj.get_fields_from_model()
+            formset_params['initial'] = obj.initialize_form()
+
+            formsets.append(FormSet(**formset_params))
+            inline_instances.append(inline)
+        return formsets, inline_instances
+
+    def get_formsets_with_inlines(self, request, obj=None):
+        """ Don't show inlines on creation. Only show on edit. """
+        for inline in self.get_inline_instances(request, obj):
+            if obj is not None:
+                yield inline.get_formset(request, obj), inline
+
+    def get_readonly_fields(self, request, obj=None):
+        """ Can't change model. """
+        if obj is None:
+            return ('created_by',)
+        else:
+            return ('created_by', 'model')
 
     def save_model(self, request, new_object, *args, **kwargs):
-        if new_object and not new_object.pk:
+        """ Only save on new filters, otherwise save on save_formset(). """
+        if new_object.pk is None:
             new_object.created_by = request.user
+        new_object.save()
+        # else:
+        #     pass
 
-        super(AdvancedFilterAdmin, self).save_model(
-            request, new_object, *args, **kwargs)
+    def save_formset(self, request, form, formset, change):
+        """ Get Condition instances, generate query and save AdvancedFilter. """
+        conditions = formset.save(commit=False)
+        form.instance.query = self.generate_query(conditions)
+        form.instance.save()
 
-    def change_view(self, request, object_id, form_url='', extra_context=None):
-        orig_response = super(AdvancedFilterAdmin, self).change_view(
-            request, object_id, form_url, extra_context)
-        if '_save_goto' in request.POST:
-            obj = self.get_object(request, unquote(object_id))
-            if obj:
-                app, model = obj.model.split('.')
-                path = resolve_url('admin:%s_%s_changelist' % (
-                    app, model.lower()))
-                url = "{path}{qparams}".format(
-                    path=path, qparams="?_afilter={id}".format(id=object_id))
-                return HttpResponseRedirect(url)
-        return orig_response
-
+    def generate_query(self, conditions):
+        """ Reduces multiple queries into a single usable query. """
+        query = Q()
+        ORed = []
+        for condition in conditions:
+            if not condition.delete:
+                if condition.field == "_OR":
+                    ORed.append(query)
+                    query = Q()
+                else:
+                    query = query & condition.make_query()
+        if ORed:
+            if query:  # add last query for OR if any
+                ORed.append(query)
+            query = reduce(operator.or_, ORed)
+        return query
 
 admin.site.register(AdvancedFilter, AdvancedFilterAdmin)

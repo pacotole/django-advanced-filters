@@ -18,7 +18,7 @@ from django.utils.text import capfirst
 
 from easy_select2.widgets import SELECT2_WIDGET_JS, SELECT2_CSS
 
-from .models import AdvancedFilter
+from .models import AdvancedFilter, Condition
 from .form_helpers import CleanWhiteSpacesMixin,  VaryingTypeCharField
 
 
@@ -347,3 +347,93 @@ class AdvancedFilterForm(CleanWhiteSpacesMixin, forms.ModelForm):
         self.instance.query = self.generate_query()
         self.instance.model = self.cleaned_data.get('model')
         return super(AdvancedFilterForm, self).save(commit)
+
+
+# ============================================================================
+# ============================================================================
+# ============================================================================
+# ============================================================================
+# ============================================================================
+
+class SimpleAdvancedFilterForm(CleanWhiteSpacesMixin, forms.ModelForm):
+    """ Build the query from field, operator and value """
+
+    class Meta:
+        model = AdvancedFilter
+        fields = ('title', 'model', 'created_by')
+        widgets ={'model': forms.Select()}
+
+    def __init__(self, *args, **kwargs):
+        super(SimpleAdvancedFilterForm, self).__init__(*args, **kwargs)
+        if 'model' in self.fields:
+            self.fields['model'].widget.choices = self.instance.get_model_choices()
+
+
+from django.forms.models import BaseInlineFormSet
+
+class CustomInlineFormset(BaseInlineFormSet):
+    """
+    Custom formset that support initial data
+    """
+
+    def __init__(self, data=None, files=None, instance=None, filter_fields=None,
+                 save_as_new=False, prefix=None, queryset=None, **kwargs):
+        """ Save self.filter_fields and pass later on _construct_form(). """
+        self.filter_fields = filter_fields
+        super(CustomInlineFormset, self).__init__(data, files, instance,
+                     save_as_new, prefix, queryset, **kwargs)
+        self.can_delete = False
+
+    def _construct_form(self, i, **kwargs):
+        """ Add filter_fields to kwargs. """
+        kwargs.update({'filter_fields': self.filter_fields})
+        return super(CustomInlineFormset, self)._construct_form(i, **kwargs)
+
+    @property
+    def empty_form(self):
+        """ Add filter_fields to empty form for "add other". """
+        form = super(CustomInlineFormset, self).empty_form
+        form.fields['field'].choices = self.filter_fields
+        form.fields['delete'].widget = forms.HiddenInput()
+        return form
+
+    def initial_form_count(self):
+        """ Set 0 to use initial_extra explicitly. """
+        return 0
+
+    def total_form_count(self):
+        """ Here use the initial_extra len to determine needed forms. """
+        if self.data:  # on POST
+            return super(CustomInlineFormset, self).total_form_count()
+        else:
+            return len(self.initial_extra) + self.extra
+
+
+class ConditionModelForm(forms.ModelForm):
+
+    field = forms.ChoiceField(label=_('field'))
+
+    class Meta:
+        model = Condition
+        fields = '__all__'
+        exclude = ('afilter',)
+
+    def has_changed(self):
+        """ Returns True to force save """
+        return True
+
+    def __init__(self, filter_fields=(), *args, **kwargs):
+        """ Set field choices with param filter_fields. """
+        super(ConditionModelForm, self).__init__(*args, **kwargs)
+        self.fields['field'].choices = filter_fields
+
+    def clean(self):
+        cleaned_data = self.cleaned_data
+        operator = cleaned_data.get('operator')
+        value = cleaned_data.get('value')
+        if operator not in ['isnull', 'istrue', 'isfalse'] and value == '':
+            self.add_error('value', _('This field is required.'))
+        # TODO: operator range --> value two comma separated
+        # TODO: check DateTime
+
+        return cleaned_data
