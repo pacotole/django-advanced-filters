@@ -19,24 +19,37 @@ class AdvancedListFilters(admin.SimpleListFilter):
 
     parameter_name = '_afilter'
 
+    def __init__(self, request, params, model, model_admin):
+        super(AdvancedListFilters, self).__init__(request, params, model, model_admin)
+        self.model_admin = model_admin
+
     def lookups(self, request, model_admin):
         if not model_admin:
-            raise Exception('Cannot use AdvancedListFilters without a '
-                            'model_admin')
+            raise Exception('Cannot use AdvancedListFilters without a model_admin')
+        filters = [(t[0], t[1]) for t in model_admin.advanced_filter_custom]
+
         model_name = "%s.%s" % (model_admin.model._meta.app_label,
                                 model_admin.model._meta.object_name)
-        return AdvancedFilter.objects.filter_by_user(request.user).filter(
+        filters += AdvancedFilter.objects.filter_by_user(request.user).filter(
             model=model_name).values_list('id', 'title')
 
+        return filters
+
     def queryset(self, request, queryset):
-        if self.value():
-            advfilter = AdvancedFilter.objects.filter(id=self.value()).first()
-            if not advfilter:
-                logger.error("AdvancedListFilters.queryset: Invalid filter id")
-                return queryset
-            query = advfilter.query
-            logger.debug(query.__dict__)
-            return queryset.filter(query).distinct()
+        value = self.value()
+        if value:
+            filters = {t[0]: t[2] for t in self.model_admin.advanced_filter_custom}
+            if value in filters:
+                query = filters[value]
+                return queryset.filter(query).distinct()
+            else:
+                advfilter = AdvancedFilter.objects.filter(id=value).first()
+                if not advfilter:
+                    logger.error("AdvancedListFilters.queryset: Invalid filter id")
+                    return queryset
+                query = advfilter.query
+                logger.debug(query.__dict__)
+                return queryset.filter(query).distinct()
         return queryset
 
 
@@ -105,8 +118,9 @@ class AdminAdvancedFiltersMixin(BaseAdminAdvancedFiltersMixin):
 # ============================================================================
 
 
-from .forms import  CustomInlineFormset, ConditionModelForm, SimpleAdvancedFilterForm
+from .forms import CustomInlineFormset, ConditionModelForm, SimpleAdvancedFilterForm
 from django.db.models import Q
+
 
 class ConditionInline(admin.TabularInline):
     """
